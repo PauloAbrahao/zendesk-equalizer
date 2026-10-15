@@ -1,12 +1,13 @@
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue'
 import { diffLines } from 'diff'
+import type { Obj } from '../../../server/zendesk.ts'
 
 // before = destino atual, after = como ficará (origem já remapeada)
-const props = defineProps({ before: Object, after: Object })
+const props = defineProps<{ before: Obj | null; after: Obj | null }>()
 
-const fmt = o => (o ? JSON.stringify(o, null, 2) + '\n' : '')
-const split = s => s.split('\n').slice(0, -1)
+const fmt = (o: Obj | null) => (o ? JSON.stringify(o, null, 2) + '\n' : '')
+const split = (s: string) => s.split('\n').slice(0, -1)
 
 // ponytail: mostra o JSON inteiro; colapsar contexto inalterado se os objetos ficarem grandes demais
 const lines = computed(() => {

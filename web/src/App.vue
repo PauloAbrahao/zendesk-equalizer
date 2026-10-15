@@ -1,30 +1,39 @@
-<script setup>
+<script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import DiffView from './components/DiffView.vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 import AuditDrawer from './components/AuditDrawer.vue'
+import DuplicatesView from './components/DuplicatesView.vue'
+import { api } from './api.ts'
+import type { Audit } from './auditPdf.ts'
+import type { CompareItem, Status } from '../../server/diff.ts'
+import type { ApplyResult } from '../../server/index.ts'
+import type { Type } from '../../server/zendesk.ts'
 
-const TYPES = { groups: 'Grupos', ticket_fields: 'Campos de ticket', ticket_forms: 'Formulários', triggers: 'Gatilhos', automations: 'Automações' }
-const STATUS = { novo: 'Novo', alterado: 'Alterado', igual: 'Igual', so_no_destino: 'Só no destino', bloqueado: 'Bloqueado' }
-const APPLICABLE = ['novo', 'alterado']
+const TYPES: Record<Type, string> = { brands: 'Marcas', groups: 'Grupos', ticket_fields: 'Campos de ticket', ticket_forms: 'Formulários', triggers: 'Gatilhos', automations: 'Automações' }
+const STATUS: Record<Status, string> = { novo: 'Novo', alterado: 'Alterado', igual: 'Igual', so_no_destino: 'Só no destino', bloqueado: 'Bloqueado' }
+const APPLICABLE: Status[] = ['novo', 'alterado']
 
-const envs = ref([])
+const VIEWS = { equalizar: 'Equalizar ambientes', duplicados: 'Verificar duplicados' } as const
+const view = ref<keyof typeof VIEWS>('equalizar')
+const envs = ref<{ name: string; isProduction: boolean }[]>([])
+const order = ref<Type[]>([])
 const source = ref('')
 const target = ref('')
-const types = ref(Object.keys(TYPES))
-const items = ref([])
-const selected = ref(new Set())
-const open = ref(new Set())
-const collapsed = ref(new Set())
+const types = ref(Object.keys(TYPES) as Type[])
+const items = ref<CompareItem[]>([])
+const selected = ref(new Set<string>())
+const open = ref(new Set<string>())
+const collapsed = ref(new Set<string>())
 const loading = ref(false)
 const applying = ref(false)
 const error = ref('')
-const audit = ref(null)
+const audit = ref<Audit | null>(null)
 const drawerOpen = ref(false)
 const modal = ref(false)
 
-const key = i => `${i.type}:${i.title}`
-const isProd = computed(() => envs.value.find(e => e.name === target.value)?.isProduction)
+const key = (i: { type: string; title: string }) => `${i.type}:${i.title}`
+const isProd = computed(() => !!envs.value.find(e => e.name === target.value)?.isProduction)
 const canCompare = computed(() => source.value && target.value && source.value !== target.value && types.value.length)
 // trocar os tipos marcados só filtra a comparação já feita; itens de tipos desmarcados não entram no aplicar
 const visible = computed(() => items.value.filter(i => types.value.includes(i.type)))
@@ -36,34 +45,20 @@ const groups = computed(() =>
 )
 const applicable = computed(() => visible.value.filter(i => APPLICABLE.includes(i.status)).map(key))
 const allSelected = computed(() => applicable.value.length > 0 && applicable.value.every(k => selected.value.has(k)))
-const selectAll = on => {
+const selectAll = (on: boolean) => {
   const s = new Set(selected.value)
   applicable.value.forEach(k => (on ? s.add(k) : s.delete(k)))
   selected.value = s
 }
-const summary = computed(() => Object.fromEntries(Object.keys(STATUS).map(s => [s, visible.value.filter(i => i.status === s).length])))
+const summary = computed(() => Object.fromEntries((Object.keys(STATUS) as Status[]).map(s => [s, visible.value.filter(i => i.status === s).length])) as Record<Status, number>)
 
-async function api(path, body) {
-  const r = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : undefined)
-  // corpo vazio/HTML = backend fora do ar ou caiu no meio da requisição (proxy do vite devolve 500 sem corpo)
-  const text = await r.text()
-  let d
-  try {
-    d = JSON.parse(text)
-  } catch {
-    throw new Error(`${r.status} ${r.statusText}: backend não respondeu JSON${text ? ` (${text.slice(0, 200)})` : ' (resposta vazia — o servidor está rodando?)'}`)
-  }
-  if (!r.ok) throw new Error(d.error)
-  return d
-}
-
-async function run(fn) {
+async function run(fn: () => Promise<unknown>) {
   loading.value = true
   error.value = ''
   try {
     await fn()
   } catch (e) {
-    error.value = e.message
+    error.value = (e as Error).message
   } finally {
     loading.value = false
   }
@@ -76,23 +71,26 @@ const fetchItems = async () => {
 
 const compare = () =>
   run(async () => {
-    selected.value = await fetchItems()
+    await fetchItems()
+    selected.value = new Set()
     open.value = new Set()
+    // cada comparação começa com tudo fechado; usuário abre o tópico que quiser
+    collapsed.value = new Set(Object.keys(TYPES))
   })
 
-const apply = confirm =>
+const apply = (confirm: string) =>
   run(async () => {
     modal.value = false
-    const snapshot = chosen.value.map(i => ({ type: i.type, title: i.title, status: i.status, before: i.target, after: i.source }))
-    const payload = snapshot.map(({ type, title }) => ({ type, title }))
+    const payload = chosen.value.map(({ type, title }) => ({ type, title }))
     applying.value = true
     try {
-      const res = await api('/api/apply', { source: source.value, target: target.value, items: payload, confirm })
+      const res: ApplyResult[] = await api('/api/apply', { source: source.value, target: target.value, items: payload, confirm })
       audit.value = {
         appliedAt: new Date().toISOString(),
         source: source.value,
         target: target.value,
-        items: res.map(r => ({ ...snapshot.find(i => i.type === r.type && i.title === r.title), ...r })),
+        // servidor devolve before/after do que realmente enviou (com IDs reais e dependências criadas)
+        items: res,
       }
       drawerOpen.value = true
       // atualiza só os diffs: seleção e itens abertos ficam como estavam (menos o que deixou de ser aplicável)
@@ -103,14 +101,47 @@ const apply = confirm =>
     }
   })
 
-const toggle = (set, k) => (set.has(k) ? set.delete(k) : set.add(k))
+// título repetido na mesma lista ganha o id na frente ("nome - 123") para dar para distinguir
+const sameName = (t: string) => t.trim().toLowerCase()
+const withIds = <T extends { title: string }>(list: T[], id: (x: T) => unknown) => {
+  const n = new Map<string, number>()
+  for (const x of list) n.set(sameName(x.title), (n.get(sameName(x.title)) ?? 0) + 1)
+  return (x: T) => (n.get(sameName(x.title))! > 1 ? `${x.title} - ${id(x)}` : x.title)
+}
+const itemLabel = computed(() => {
+  const byType = new Map(types.value.map(t => [t, withIds(visible.value.filter(i => i.type === t), i => i.sourceId ?? i.targetId)]))
+  return (i: CompareItem) => byType.get(i.type)!(i)
+})
+
+// pares possíveis para vincular manualmente: candidatos do título repetido ou o que sobrou só no destino
+const linkOptions = (i: CompareItem) => {
+  const list = i.candidates ?? items.value.filter(x => x.type === i.type && x.status === 'so_no_destino').map(x => ({ id: x.targetId!, title: x.title }))
+  const label = withIds(list, o => o.id)
+  return list.map(o => ({ id: o.id, label: label(o) }))
+}
+
+// grava (ou desfaz, com null) o vínculo e recompara; seleção fica, menos o que deixou de ser aplicável
+const link = (i: CompareItem, targetId: number | null) =>
+  run(async () => {
+    await api('/api/mappings', { source: source.value, target: target.value, type: i.type, sourceId: i.sourceId, targetId })
+    const still = await fetchItems()
+    selected.value = new Set([...selected.value].filter(k => still.has(k)))
+  })
+
+const toggle = (set: Set<string>, k: string) => (set.has(k) ? set.delete(k) : set.add(k))
 
 // trocar de ambiente invalida a comparação anterior
 watch([source, target], () => {
   items.value = []
 })
 
-onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
+onMounted(() =>
+  run(async () => {
+    const d = await api('/api/environments')
+    envs.value = d.environments
+    order.value = d.order
+  }),
+)
 </script>
 
 
@@ -122,12 +153,29 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
     <span class="appname">Zendesk Equalizer</span>
   </header>
 
-  <div v-if="isProd" class="flash-prod" role="alert">
+  <div v-if="isProd && view === 'equalizar'" class="flash-prod" role="alert">
     <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575ZM8 5a.75.75 0 0 0-.75.75v2.5a.75.75 0 0 0 1.5 0v-2.5A.75.75 0 0 0 8 5Zm1 6a1 1 0 1 0-2 0 1 1 0 0 0 2 0Z"/></svg>
     O destino é <b>produção</b> (<code>{{ target }}</code>). Toda alteração afeta o atendimento real.
   </div>
 
-  <main :class="{ 'with-drawer': audit && drawerOpen }">
+  <div class="layout">
+  <nav class="sidebar" aria-label="Menu">
+    <button
+      v-for="(label, v) in VIEWS"
+      :key="v"
+      :class="['nav-item', { active: view === v }]"
+      :aria-current="view === v ? 'page' : undefined"
+      @click="view = v"
+    >
+      <svg v-if="v === 'equalizar'" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M2 3h2v10H2zM7 6h2v7H7zM12 1h2v12h-2z" /></svg>
+      <svg v-else viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 0 1 0 1.5h-1.5a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-1.5a.75.75 0 0 1 1.5 0v1.5A1.75 1.75 0 0 1 9.25 16h-7.5A1.75 1.75 0 0 1 0 14.25ZM5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0 1 14.25 11h-7.5A1.75 1.75 0 0 1 5 9.25Zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 0 0 .25-.25v-7.5a.25.25 0 0 0-.25-.25Z"/></svg>
+      {{ label }}
+    </button>
+  </nav>
+
+  <DuplicatesView v-show="view === 'duplicados'" :envs="envs" :labels="TYPES" />
+
+  <main v-show="view === 'equalizar'" :class="{ 'with-drawer': audit && drawerOpen }">
     <div class="pagehead">
       <h1>Comparar ambientes</h1>
       <p class="muted">Escolha a origem e o destino, revise as diferenças e aplique só o que quiser.</p>
@@ -163,8 +211,9 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
             <span>{{ label }}</span>
           </label>
         </fieldset>
-        <button class="btn primary" :disabled="!canCompare || loading" @click="compare">
-          {{ loading ? 'Comparando…' : 'Comparar' }}
+        <button class="btn primary" :disabled="!canCompare || loading" :aria-busy="loading && !applying" @click="compare">
+          <span v-if="loading && !applying" class="spinner" aria-hidden="true"></span>
+          <span class="label-text">Comparar</span>
         </button>
       </div>
     </section>
@@ -182,7 +231,7 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
             type="checkbox"
             :checked="allSelected"
             :disabled="!applicable.length"
-            @change="selectAll($event.target.checked)"
+            @change="selectAll(($event.target as HTMLInputElement).checked)"
           />
           {{ allSelected ? 'Desmarcar todos' : 'Marcar todos' }}
         </label>
@@ -202,8 +251,10 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
           <div class="item-row">
             <button class="title" :aria-expanded="open.has(key(i))" @click="toggle(open, key(i))">
               <svg class="caret" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z"/></svg>
-              <span>{{ i.title }}</span>
+              <span>{{ itemLabel(i) }}</span>
             </button>
+            <span v-if="i.matchedBy === 'conteudo'" class="label warn" title="Título diferente; casado pelo conteúdo. Confira o diff.">por conteúdo</span>
+            <span v-if="i.matchedBy === 'manual'" class="label">vínculo manual</span>
             <span :class="['label', i.status]">{{ STATUS[i.status] }}</span>
             <label class="include" :class="{ on: selected.has(key(i)) }">
               <input
@@ -215,8 +266,22 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
               Incluir
             </label>
           </div>
-          <small v-if="i.missing.length" class="note warn">Requer migrar também: {{ i.missing.join(', ') }}</small>
+          <small v-if="i.requires?.length" class="note warn">Será criado junto (dependência): {{ i.requires.map(d => d.label).join(', ') }}</small>
+          <small v-for="e in i.requiresErrors" :key="e" class="note error">{{ e }}</small>
           <small v-for="b in i.blocked" :key="b" class="note error">{{ b }}</small>
+          <small v-if="i.suggestion" class="note link">
+            Parece ser <b>{{ i.suggestion.title }}</b> no destino ({{ Math.round(i.suggestion.score * 100) }}%)
+            <button class="btn small" :disabled="loading" @click="link(i, i.suggestion.targetId)">É o mesmo</button>
+          </small>
+          <small v-if="i.sourceId && (i.status === 'novo' || i.candidates) && linkOptions(i).length" class="note link">
+            <select :disabled="loading" aria-label="Vincular a um item do destino" @change="link(i, Number(($event.target as HTMLSelectElement).value))">
+              <option value="" selected disabled>vincular a item do destino…</option>
+              <option v-for="o in linkOptions(i)" :key="o.id" :value="o.id">{{ o.label }}</option>
+            </select>
+          </small>
+          <small v-if="i.matchedBy === 'manual'" class="note link">
+            <button class="btn small" :disabled="loading" @click="link(i, null)">Desfazer vínculo</button>
+          </small>
           <DiffView v-if="open.has(key(i))" :before="i.target" :after="i.source" />
         </div>
         </template>
@@ -228,11 +293,12 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
         </span>
         <button class="btn" :class="isProd ? 'danger' : 'primary'" :disabled="!chosen.length || loading" :aria-busy="applying" @click="modal = true">
           <span v-if="applying" class="spinner" aria-hidden="true"></span>
-          {{ applying ? `Aplicando em ${target}…` : `Aplicar em ${target}` }}
+          <span class="label-text">Aplicar em {{ target }}</span>
         </button>
       </div>
     </template>
   </main>
+  </div>
 
   <ConfirmModal
     v-if="modal"
@@ -241,6 +307,7 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
     :target="target"
     :is-prod="isProd"
     :labels="TYPES"
+    :order="order"
     @cancel="modal = false"
     @confirm="apply"
   />
@@ -263,7 +330,13 @@ onMounted(() => run(async () => (envs.value = await api('/api/environments'))))
 * { box-sizing: border-box; }
 html { scrollbar-gutter: stable; }
 body { margin: 0; background: var(--canvas); color: var(--fg); font: 14px/1.5 var(--sans); }
-main { max-width: 1012px; margin: 0 auto; padding: 24px 16px 0; }
+.layout { display: flex; align-items: flex-start; }
+.sidebar { position: sticky; top: 0; flex: none; width: 232px; min-height: calc(100vh - 53px); display: flex; flex-direction: column; gap: 2px; padding: 16px 8px; border-right: 1px solid var(--border-muted); background: var(--inset); }
+.nav-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: 500 14px var(--sans); text-align: left; cursor: pointer; position: relative; }
+.nav-item:hover { background: var(--overlay); color: var(--fg); }
+.nav-item.active { background: var(--overlay); color: var(--fg); font-weight: 600; }
+.nav-item.active::before { content: ''; position: absolute; left: -8px; top: 6px; bottom: 6px; width: 4px; border-radius: 6px; background: var(--accent); }
+main { flex: 1; min-width: 0; max-width: 1012px; margin: 0 auto; padding: 24px 16px 0; }
 h1 { font-size: 24px; font-weight: 600; margin: 0 0 4px; }
 h2 { font-size: 14px; font-weight: 600; margin: 0; }
 code { font: 12px var(--mono); padding: 2px 6px; border-radius: 6px; background: rgb(101 108 118 / 0.2); }
@@ -278,7 +351,10 @@ input[type=checkbox] { accent-color: var(--accent); margin: 0; }
 .btn:hover:not(:disabled) { background: #262c36; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn[aria-busy=true] { opacity: 1; cursor: progress; }
-.btn { display: inline-flex; align-items: center; gap: 8px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; position: relative; }
+/* texto fica invisível (mas ocupa espaço) pra o botão não mudar de largura; spinner centralizado por cima */
+.btn[aria-busy=true] .label-text { visibility: hidden; }
+.btn[aria-busy=true] .spinner { position: absolute; inset: 0; margin: auto; }
 .spinner { width: 14px; height: 14px; border: 2px solid rgb(255 255 255 / 0.35); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
@@ -352,6 +428,10 @@ input[type=checkbox] { accent-color: var(--accent); margin: 0; }
 .label.novo { color: var(--success); border-color: rgb(63 185 80 / 0.5); }
 .label.alterado { color: var(--attention); border-color: rgb(210 153 34 / 0.5); }
 .label.bloqueado { color: var(--danger); border-color: rgb(248 81 73 / 0.5); }
+.label.warn { border-color: rgb(210 153 34 / 0.5); }
+.note.link { display: flex; align-items: center; gap: 8px; margin-top: 4px; color: var(--muted); }
+.note.link select { padding: 2px 8px; font-size: 12px; }
+.btn.small { padding: 2px 10px; font-size: 12px; line-height: 18px; }
 .include { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
 .include.on { color: var(--fg); background: rgb(56 139 253 / 0.15); border-color: rgb(56 139 253 / 0.4); }
 .include:has(input:disabled) { opacity: 0.5; cursor: not-allowed; }
@@ -362,6 +442,10 @@ input[type=checkbox] { accent-color: var(--accent); margin: 0; }
 
 @media (max-width: 640px) {
   .appheader { padding: 12px 16px; }
+  .layout { flex-direction: column; align-items: stretch; }
+  .sidebar { position: static; width: auto; min-height: 0; flex-direction: row; overflow-x: auto; padding: 8px 16px; border-right: 0; border-bottom: 1px solid var(--border-muted); }
+  .nav-item { white-space: nowrap; }
+  .nav-item.active::before { left: 8px; right: 8px; top: auto; bottom: -8px; width: auto; height: 3px; }
   .range-arrow { transform: rotate(90deg); }
   .range { flex-direction: column; align-items: flex-start; }
   .item-row { flex-wrap: wrap; }

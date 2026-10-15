@@ -4,11 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently -n api,web npm:server npm:web",
-    "server": "node --env-file=.env --watch server/index.js",
+    "server": "node --env-file=.env --watch server/index.ts",
     "web": "vite web",
     "build": "vite build web",
-    "start": "node --env-file=.env server/index.js",
-    "test": "node --test server/*.test.js web/src/*.test.js"
+    "start": "node --env-file=.env server/index.ts",
+    "test": "node --test server/*.test.ts web/src/*.test.ts",
+    "typecheck": "vue-tsc"
   },
   "dependencies": {
     "diff": "^7.0.0",
@@ -16,8 +17,13 @@
     "vue": "^3.5.13"
   },
   "devDependencies": {
+    "@types/diff": "^7.0.2",
+    "@types/express": "^5.0.6",
+    "@types/node": "^24.19.2",
     "@vitejs/plugin-vue": "^5.2.4",
     "concurrently": "^9.1.2",
-    "vite": "^6.3.5"
+    "typescript": "^6.0.3",
+    "vite": "^6.3.5",
+    "vue-tsc": "^3.3.13"
   }
 }

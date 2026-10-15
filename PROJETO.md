@@ -16,7 +16,7 @@ Antes de aplicar qualquer coisa, mostra um diff no estilo "merge do GitHub": o q
 | Camada    | Tecnologia                                   |
 |-----------|----------------------------------------------|
 | Frontend  | Vue 3 + Vite (sem lib de UI, sem store/router) |
-| Backend   | Node.js 20+ + Express                         |
+| Backend   | Node.js 24+ + Express + TypeScript            |
 | Diff      | `diff` (jsdiff) — diff linha a linha do JSON  |
 | Zendesk   | REST API v2, autenticação por API token       |
 
@@ -25,9 +25,9 @@ Antes de aplicar qualquer coisa, mostra um diff no estilo "merge do GitHub": o q
 ```
  Navegador (Vue)                Backend (Express)                   Zendesk
  ┌──────────────┐  /api/*  ┌────────────────────────┐   REST v2   ┌──────────────┐
- │ App.vue      │ ───────▶ │ index.js   (rotas)     │ ──────────▶ │ origem       │
- │ DiffView.vue │          │ zendesk.js (client)    │ ──────────▶ │ destino      │
- │ ConfirmModal │ ◀─────── │ diff.js    (compare)   │             └──────────────┘
+ │ App.vue      │ ───────▶ │ index.ts   (rotas)     │ ──────────▶ │ origem       │
+ │ DiffView.vue │          │ zendesk.ts (client)    │ ──────────▶ │ destino      │
+ │ ConfirmModal │ ◀─────── │ diff.ts    (compare)   │             └──────────────┘
  └──────────────┘          └────────────────────────┘
 ```
 
@@ -36,12 +36,12 @@ Antes de aplicar qualquer coisa, mostra um diff no estilo "merge do GitHub": o q
 
 ```
 server/
-  index.js       rotas HTTP
-  zendesk.js     client Zendesk (paginação, create/update, retry em 429)
-  diff.js        matching por título, remapeamento de IDs, status
-  diff.test.js   testes (node:test)
+  index.ts       rotas HTTP
+  zendesk.ts     client Zendesk (paginação, create/update, retry em 429)
+  diff.ts        matching por título, remapeamento de IDs, status
+  diff.test.ts   testes (node:test)
 web/
-  index.html, vite.config.js
+  index.html, vite.config.ts
   src/App.vue                     tela única
   src/components/DiffView.vue     diff estilo GitHub
   src/components/ConfirmModal.vue modal de confirmação
@@ -76,7 +76,7 @@ O token é gerado em *Admin Center → Apps e integrações → APIs → API do 
 | Gatilhos          | `/api/v2/triggers`         | `title`           | Remapeia campos, formulários e grupos |
 | Automações        | `/api/v2/automations`      | `title`           | Idem gatilhos                       |
 
-Adicionar um tipo novo (ex.: macros, views) = uma linha em `TYPES` (`server/zendesk.js`) + regra de remap em `diff.js` se ele referenciar IDs.
+Adicionar um tipo novo (ex.: macros, views) = uma linha em `TYPES` (`server/zendesk.ts`) + regra de remap em `diff.ts` se ele referenciar IDs.
 
 ## Regras de equalização
 

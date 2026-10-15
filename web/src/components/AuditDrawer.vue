@@ -1,10 +1,9 @@
-<script setup>
+<script setup lang="ts">
 import { computed } from 'vue'
-import { pdfItems } from '../auditPdf.js'
+import { pdfItems, type Audit } from '../auditPdf.ts'
 
-// audit = { appliedAt, source, target, items: [{ type, title, status, ok, action, error, before, after }] }
-const props = defineProps({ audit: Object, labels: Object, open: Boolean })
-const emit = defineEmits(['update:open'])
+const props = defineProps<{ audit: Audit; labels: Record<string, string>; open: boolean }>()
+const emit = defineEmits<{ 'update:open': [open: boolean] }>()
 
 const failed = computed(() => props.audit.items.filter(i => !i.ok).length)
 const when = computed(() => new Date(props.audit.appliedAt).toLocaleString('pt-BR'))
@@ -48,6 +47,7 @@ function pdf() {
         <div>
           <span class="muted">{{ labels[i.type] ?? i.type }}</span>
           <div class="name">{{ i.title }}</div>
+          <small v-if="i.requiredBy" class="muted">dependência de {{ i.requiredBy.join(', ') }}</small>
           <small v-if="!i.ok" class="error">{{ i.error }}</small>
         </div>
         <span v-if="i.ok" :class="['label', i.action === 'criado' ? 'novo' : 'alterado']">{{ i.action }}</span>
@@ -128,7 +128,7 @@ function pdf() {
   .audit-print { display: block; color: #1f2328; font: 11px/1.4 var(--sans, sans-serif); }
   .audit-print h1 { font-size: 16px; margin: 0; }
   .audit-print > p { margin: 2px 0 12px; color: #59636e; }
-  /* um item nunca se divide entre páginas; o corte em auditPdf.js garante que cabe em uma */
+  /* um item nunca se divide entre páginas; o corte em auditPdf.ts garante que cabe em uma */
   .audit-print section { break-inside: avoid; margin-bottom: 12px; }
   .audit-print table { width: 100%; table-layout: fixed; border-collapse: collapse; }
   .audit-print th, .audit-print td { border: 1px solid #d1d9e0; padding: 4px 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
