@@ -122,14 +122,8 @@ const same = (a: unknown, b: unknown) => JSON.stringify(sortKeys(a)) === JSON.st
 const pick = (o: Obj, keys: string[]) => Object.fromEntries(keys.filter(k => k in o).map(k => [k, o[k]]))
 const isNum = (v: unknown) => /^\d+$/.test(String(v))
 
-// ids citados por forms/gatilhos/automações.
-// ponytail: busca textual por números no JSON; IDs do Zendesk são longos demais para colidir na prática
-function usedIds(snap: Snapshot) {
-  const used = new Set<string>()
-  for (const k of ['ticket_forms', 'triggers', 'automations'] as const)
-    for (const { id, url, ...o } of snap[k] ?? []) for (const [n] of JSON.stringify(o).matchAll(/\d+/g)) used.add(n)
-  return used
-}
+// ids citados por forms/gatilhos/automações
+const usedIds = (snap: Snapshot) => new Set([...usages(snap).keys()].map(k => k.split(':')[1]!))
 
 // título normalizado -> objeto; com títulos repetidos vence o usado em forms/gatilhos/automações, depois o updated_at mais recente
 function byTitle(list: Obj[], key: string, used: Set<string>) {
@@ -284,8 +278,13 @@ export function resolve(type: Type, obj: Obj, ctx: Ctx) {
     return `<novo: ${m.name}>`
   }
 
-  const p = cleanFor(type, obj)
+  const p = mapRefs(type, cleanFor(type, obj), ref, msg => blocked.push(msg))
+  return { payload: p, missing, blocked }
+}
 
+// percorre toda referência a campo/form/grupo/marca do objeto (já limpo); ref devolve o valor que fica no lugar.
+// onBlocked = referência a algo que não migramos (usuário, webhook...)
+function mapRefs(type: Type, p: Obj, ref: (kind: Kind, id: any) => any, onBlocked: (msg: string) => void = () => {}) {
   if (p.restricted_brand_ids) p.restricted_brand_ids = p.restricted_brand_ids.map((id: number) => ref('brands', id)).sort((a: number, b: number) => a - b)
 
   if (type === 'ticket_forms') {
@@ -311,14 +310,33 @@ export function resolve(type: Type, obj: Obj, ctx: Ctx) {
       else if (field === 'brand_id' && isNum(value)) value = ref('brands', value)
       else if (field === 'notification_group' && isNum(first)) value = [ref('groups', first), ...value.slice(1)]
       else if (ALWAYS_BLOCK.has(field) || (NUMERIC_BLOCK.has(field) && isNum(first)))
-        blocked.push(`${field} referencia ID específico do ambiente (${first})`)
+        onBlocked(`${field} referencia ID específico do ambiente (${first})`)
       return { ...r, field, value }
     }
     if (p.conditions) p.conditions = { all: p.conditions.all.map(rule), any: p.conditions.any.map(rule) }
     if (p.actions) p.actions = p.actions.map(rule)
   }
+  return p
+}
 
-  return { payload: p, missing, blocked }
+export type Usage = { type: Type; id: number; title: string }
+
+// "tipo:id" -> quem referencia (forms, gatilhos, automações) no mesmo ambiente
+export function usages(snap: Snapshot) {
+  const out = new Map<string, Usage[]>()
+  for (const type of ['ticket_forms', 'triggers', 'automations'] as const)
+    for (const o of snap[type] ?? []) {
+      const seen = new Set<string>()
+      mapRefs(type, cleanFor(type, o), (kind, id) => {
+        const k = `${KIND_TYPE[kind]}:${id}`
+        if (id != null && !seen.has(k)) {
+          seen.add(k)
+          out.set(k, [...(out.get(k) ?? []), { type, id: o.id, title: o[TYPES[type].title] }])
+        }
+        return id
+      })
+    }
+  return out
 }
 
 export function compare(type: Type, ctx: Ctx): Item[] {
@@ -346,11 +364,11 @@ export function compare(type: Type, ctx: Ctx): Item[] {
   return items
 }
 
-export type Duplicate = { type: Type; items: { id: number; title: string; used: boolean; active: boolean; updated_at?: string }[] }
+export type Duplicate = { type: Type; items: { id: number; title: string; usedBy: Usage[]; active: boolean; updated_at?: string }[] }
 
 // nomes repetidos dentro de um mesmo ambiente (mesma normalização do matching); só o que é migrável
 export function duplicates(snap: Snapshot, types: Type[]): Duplicate[] {
-  const used = usedIds(snap)
+  const used = usages(snap)
   return types.flatMap(type => {
     const key = TYPES[type].title
     const list = (snap[type] ?? []).filter(INCLUDE[type] ?? (() => true))
@@ -358,7 +376,7 @@ export function duplicates(snap: Snapshot, types: Type[]): Duplicate[] {
       .filter(g => g.length > 1)
       .map(g => ({
         type,
-        items: g.map(o => ({ id: o.id, title: o[key], used: used.has(String(o.id)), active: o.active !== false, updated_at: o.updated_at })),
+        items: g.map(o => ({ id: o.id, title: o[key], usedBy: used.get(`${type}:${o.id}`) ?? [], active: o.active !== false, updated_at: o.updated_at })),
       }))
   })
 }

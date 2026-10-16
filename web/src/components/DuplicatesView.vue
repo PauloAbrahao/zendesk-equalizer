@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { api } from '../api.ts'
-import type { Duplicate } from '../../../server/diff.ts'
+import type { Duplicate, Usage } from '../../../server/diff.ts'
 import type { Type } from '../../../server/zendesk.ts'
 
 const props = defineProps<{ envs: { name: string; isProduction: boolean }[]; labels: Record<Type, string> }>()
@@ -36,6 +36,11 @@ const toggle = (t: string) => {
   const s = new Set(collapsed.value)
   s.has(t) ? s.delete(t) : s.add(t)
   collapsed.value = s
+}
+const byType = (list: Usage[]) => {
+  const m: Partial<Record<Type, Usage[]>> = {}
+  for (const u of list) (m[u.type] ??= []).push(u)
+  return m
 }
 const date = (s?: string) => (s ? new Date(s).toLocaleDateString('pt-BR') : '')
 
@@ -91,10 +96,18 @@ watch(env, () => (result.value = null))
           <b>{{ d.items[0]!.title }}</b> <span class="muted">· {{ d.items.length }} itens</span>
           <ul>
             <li v-for="i in d.items" :key="i.id">
-              <span>{{ i.title }} - {{ i.id }}</span>
-              <span v-if="i.used" class="label" title="Referenciado por formulário, gatilho ou automação">em uso</span>
-              <span v-if="!i.active" class="label">inativo</span>
-              <span v-if="i.updated_at" class="muted">atualizado em {{ date(i.updated_at) }}</span>
+              <div class="head">
+                <span>{{ i.title }} - {{ i.id }}</span>
+                <span v-if="!i.usedBy.length" class="label" title="Nenhum formulário, gatilho ou automação referencia este item">sem uso</span>
+                <span v-if="!i.active" class="label">inativo</span>
+                <span v-if="i.updated_at" class="muted">atualizado em {{ date(i.updated_at) }}</span>
+              </div>
+              <dl v-if="i.usedBy.length" class="uses">
+                <template v-for="(list, t) in byType(i.usedBy)" :key="t">
+                  <dt>{{ labels[t] }}</dt>
+                  <dd>{{ list!.map(u => `${u.title} - ${u.id}`).join(', ') }}</dd>
+                </template>
+              </dl>
             </li>
           </ul>
         </div>
@@ -105,6 +118,10 @@ watch(env, () => (result.value = null))
 
 <style scoped>
 .dup ul { list-style: none; margin: 6px 0 0; padding: 0 0 0 16px; }
-.dup li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 2px 0; font-family: var(--mono); font-size: 13px; }
-.dup li .muted { font-family: var(--sans); font-size: 12px; }
+.dup li { padding: 4px 0; }
+.dup .head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-family: var(--mono); font-size: 13px; }
+.dup .head .muted { font-family: var(--sans); font-size: 12px; }
+.uses { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 4px 0 0 16px; font-size: 12px; }
+.uses dt { color: var(--muted); }
+.uses dd { margin: 0; overflow-wrap: anywhere; }
 </style>

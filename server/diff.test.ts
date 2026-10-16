@@ -206,10 +206,14 @@ test('duplicados: mesmo nome normalizado no ambiente, ignora sistema e apagados'
       { id: 3, title: 'Banco', removable: false, type: 'subject' },
       { id: 4, title: 'Único', removable: true, type: 'text' },
     ],
-    ticket_forms: [{ id: 9, name: 'F', ticket_field_ids: [2] }],
+    ticket_forms: [{ id: 9, name: 'F', ticket_field_ids: [2, 2] }],
+    triggers: [{ id: 20, title: 'G', conditions: { all: [{ field: 'custom_fields_2', operator: 'is', value: 'x' }] }, actions: [{ field: 'group_id', value: '5' }] }],
     groups: [{ id: 5, name: 'N1' }, { id: 6, name: 'N1', deleted: true }],
   }
   const d = duplicates(snap, ['ticket_fields', 'groups'])
   assert.equal(d.length, 1)
-  assert.deepEqual(d[0]!.items.map(i => [i.id, i.used, i.active]), [[1, false, false], [2, true, true]])
+  assert.deepEqual(d[0]!.items.map(i => [i.id, i.usedBy.map(u => `${u.type}:${u.title}`), i.active]), [
+    [1, [], false],
+    [2, ['ticket_forms:F', 'triggers:G'], true], // repetido no mesmo form conta uma vez
+  ])
 })
