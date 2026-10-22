@@ -13,9 +13,10 @@ const collapsed = ref(new Set<string>())
 const loading = ref(false)
 const error = ref('')
 
+const byTitle = new Intl.Collator('pt-BR', { sensitivity: 'base', numeric: true })
 const groups = computed(() =>
   types.value
-    .map(t => ({ type: t, dups: (result.value ?? []).filter(d => d.type === t) }))
+    .map(t => ({ type: t, dups: (result.value ?? []).filter(d => d.type === t).sort((a, b) => byTitle.compare(a.items[0]!.title, b.items[0]!.title)) }))
     .filter(g => g.dups.length),
 )
 
@@ -51,7 +52,7 @@ watch(env, () => (result.value = null))
   <main>
     <div class="pagehead">
       <h1>Verificar duplicados</h1>
-      <p class="muted">Itens com o mesmo nome dentro de um ambiente (ignora maiúsculas, acentos, espaços e pontuação). Duplicados impedem o vínculo automático ao equalizar.</p>
+      <p class="muted">Itens com o mesmo nome dentro de um ambiente (ignora maiúsculas, acentos e espaços). Duplicados impedem o vínculo automático ao equalizar.</p>
     </div>
 
     <section class="box compare">

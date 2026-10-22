@@ -10,7 +10,7 @@ import type { CompareItem, Status } from '../../server/diff.ts'
 import type { ApplyResult } from '../../server/index.ts'
 import type { Type } from '../../server/zendesk.ts'
 
-const TYPES: Record<Type, string> = { brands: 'Marcas', groups: 'Grupos', ticket_fields: 'Campos de ticket', ticket_forms: 'Formulários', triggers: 'Gatilhos', automations: 'Automações' }
+const TYPES: Record<Type, string> = { brands: 'Marcas', groups: 'Grupos', ticket_fields: 'Campos de ticket', ticket_forms: 'Formulários', triggers: 'Gatilhos', automations: 'Automações', sla_policies: 'SLAs' }
 const STATUS: Record<Status, string> = { novo: 'Novo', alterado: 'Alterado', igual: 'Igual', so_no_destino: 'Só no destino', bloqueado: 'Bloqueado' }
 const APPLICABLE: Status[] = ['novo', 'alterado']
 
@@ -38,9 +38,10 @@ const canCompare = computed(() => source.value && target.value && source.value !
 // trocar os tipos marcados só filtra a comparação já feita; itens de tipos desmarcados não entram no aplicar
 const visible = computed(() => items.value.filter(i => types.value.includes(i.type)))
 const chosen = computed(() => visible.value.filter(i => selected.value.has(key(i))))
+const byTitle = new Intl.Collator('pt-BR', { sensitivity: 'base', numeric: true })
 const groups = computed(() =>
   types.value
-    .map(t => ({ type: t, items: visible.value.filter(i => i.type === t && i.status !== 'igual') }))
+    .map(t => ({ type: t, items: visible.value.filter(i => i.type === t && i.status !== 'igual').sort((a, b) => byTitle.compare(a.title, b.title)) }))
     .filter(g => visible.value.some(i => i.type === g.type)),
 )
 const applicable = computed(() => visible.value.filter(i => APPLICABLE.includes(i.status)).map(key))
@@ -113,14 +114,7 @@ const itemLabel = computed(() => {
   return (i: CompareItem) => byType.get(i.type)!(i)
 })
 
-// pares possíveis para vincular manualmente: candidatos do título repetido ou o que sobrou só no destino
-const linkOptions = (i: CompareItem) => {
-  const list = i.candidates ?? items.value.filter(x => x.type === i.type && x.status === 'so_no_destino').map(x => ({ id: x.targetId!, title: x.title }))
-  const label = withIds(list, o => o.id)
-  return list.map(o => ({ id: o.id, label: label(o) }))
-}
-
-// grava (ou desfaz, com null) o vínculo e recompara; seleção fica, menos o que deixou de ser aplicável
+// grava o vínculo (null desfaz) e recompara; seleção fica, menos o que deixou de ser aplicável
 const link = (i: CompareItem, targetId: number | null) =>
   run(async () => {
     await api('/api/mappings', { source: source.value, target: target.value, type: i.type, sourceId: i.sourceId, targetId })
@@ -255,6 +249,7 @@ onMounted(() =>
             </button>
             <span v-if="i.matchedBy === 'conteudo'" class="label warn" title="Título diferente; casado pelo conteúdo. Confira o diff.">por conteúdo</span>
             <span v-if="i.matchedBy === 'manual'" class="label">vínculo manual</span>
+            <button v-if="i.matchedBy === 'manual'" class="btn small" :disabled="loading" @click="link(i, null)">Desfazer vínculo</button>
             <span :class="['label', i.status]">{{ STATUS[i.status] }}</span>
             <label class="include" :class="{ on: selected.has(key(i)) }">
               <input
@@ -272,15 +267,6 @@ onMounted(() =>
           <small v-if="i.suggestion" class="note link">
             Parece ser <b>{{ i.suggestion.title }}</b> no destino ({{ Math.round(i.suggestion.score * 100) }}%)
             <button class="btn small" :disabled="loading" @click="link(i, i.suggestion.targetId)">É o mesmo</button>
-          </small>
-          <small v-if="i.sourceId && (i.status === 'novo' || i.candidates) && linkOptions(i).length" class="note link">
-            <select :disabled="loading" aria-label="Vincular a um item do destino" @change="link(i, Number(($event.target as HTMLSelectElement).value))">
-              <option value="" selected disabled>vincular a item do destino…</option>
-              <option v-for="o in linkOptions(i)" :key="o.id" :value="o.id">{{ o.label }}</option>
-            </select>
-          </small>
-          <small v-if="i.matchedBy === 'manual'" class="note link">
-            <button class="btn small" :disabled="loading" @click="link(i, null)">Desfazer vínculo</button>
           </small>
           <DiffView v-if="open.has(key(i))" :before="i.target" :after="i.source" />
         </div>
@@ -430,7 +416,6 @@ input[type=checkbox] { accent-color: var(--accent); margin: 0; }
 .label.bloqueado { color: var(--danger); border-color: rgb(248 81 73 / 0.5); }
 .label.warn { border-color: rgb(210 153 34 / 0.5); }
 .note.link { display: flex; align-items: center; gap: 8px; margin-top: 4px; color: var(--muted); }
-.note.link select { padding: 2px 8px; font-size: 12px; }
 .btn.small { padding: 2px 10px; font-size: 12px; line-height: 18px; }
 .include { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; font-size: 12px; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
 .include.on { color: var(--fg); background: rgb(56 139 253 / 0.15); border-color: rgb(56 139 253 / 0.4); }

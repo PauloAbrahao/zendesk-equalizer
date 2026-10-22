@@ -15,7 +15,7 @@ Object.assign(process.env, {
   MAPPINGS_FILE: join(tmpdir(), `zd-equalizer-mappings-${process.pid}.json`),
 })
 
-const empty = () => ({ brands: [], groups: [], ticket_fields: [], ticket_forms: [], triggers: [], automations: [] })
+const empty = () => ({ brands: [], groups: [], ticket_fields: [], ticket_forms: [], triggers: [], automations: [], custom_statuses: [] })
 let db: any, writes: string[], nextId: number
 const realFetch = globalThis.fetch
 

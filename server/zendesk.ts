@@ -1,4 +1,4 @@
-// path = endpoint e chave da lista; one = chave do objeto único; title = chave de matching
+// path = endpoint; key = chave da lista (quando difere do path); one = chave do objeto único; title = chave de matching
 export type Obj = Record<string, any>
 
 export const TYPES = {
@@ -8,14 +8,17 @@ export const TYPES = {
   automations: { path: 'automations', one: 'automation', title: 'title' },
   groups: { path: 'groups', one: 'group', title: 'name' },
   brands: { path: 'brands', one: 'brand', title: 'name' },
+  sla_policies: { path: 'slas/policies', key: 'sla_policies', one: 'sla_policy', title: 'title' },
 } as const
 
 export type Type = keyof typeof TYPES
-export type Snapshot = Partial<Record<Type, Obj[]>>
+// status personalizado: só leitura, serve de mapa de IDs para gatilhos/automações (não migrável)
+type ReadOnly = 'custom_statuses'
+export type Snapshot = Partial<Record<Type | ReadOnly, Obj[]>>
 export type Client = ReturnType<typeof client>
 
 // ordem de aplicação: dependências primeiro
-export const ORDER: Type[] = ['brands', 'groups', 'ticket_fields', 'ticket_forms', 'triggers', 'automations']
+export const ORDER: Type[] = ['brands', 'groups', 'ticket_fields', 'ticket_forms', 'triggers', 'automations', 'sla_policies']
 
 export function client(env: string) {
   const P = env.toUpperCase()
@@ -38,12 +41,12 @@ export function client(env: string) {
   }
 
   return {
-    async list(type: Type) {
-      const { path } = TYPES[type]
+    async list(type: Type | ReadOnly) {
+      const t: { path: string; key?: string } = type === 'custom_statuses' ? { path: type } : TYPES[type]
       const out: Obj[] = []
-      for (let url: string | null = `${base}${path}.json?per_page=100`; url; ) {
+      for (let url: string | null = `${base}${t.path}.json?per_page=100`; url; ) {
         const d = await call(url)
-        out.push(...d[path])
+        out.push(...d[t.key ?? t.path])
         url = d.next_page
       }
       return out
@@ -56,8 +59,9 @@ export function client(env: string) {
 }
 
 // busca tudo que o compare precisa: listas pedidas + campos/forms/grupos para o remap
-// + gatilhos/automações para saber quais itens de título repetido estão em uso
+// + gatilhos/automações para saber quais itens de título repetido estão em uso.
+// SLA só quando pedido: ninguém depende dele e conta sem o recurso responde 403
 export async function snapshot(c: Client, types: Type[]): Promise<Snapshot> {
-  const keys = [...new Set([...ORDER, ...types])]
+  const keys = [...new Set<Type | ReadOnly>([...ORDER.filter(t => t !== 'sla_policies'), 'custom_statuses', ...types])]
   return Object.fromEntries(await Promise.all(keys.map(async k => [k, await c.list(k)])))
 }

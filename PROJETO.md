@@ -75,6 +75,7 @@ O token é gerado em *Admin Center → Apps e integrações → APIs → API do 
 | Formulários       | `/api/v2/ticket_forms`     | `name`            | Remapeia `ticket_field_ids` e condições |
 | Gatilhos          | `/api/v2/triggers`         | `title`           | Remapeia campos, formulários e grupos |
 | Automações        | `/api/v2/automations`      | `title`           | Idem gatilhos                       |
+| SLAs              | `/api/v2/slas/policies`    | `title`           | Remapeia o filtro como gatilhos; só buscado quando marcado |
 
 Adicionar um tipo novo (ex.: macros, views) = uma linha em `TYPES` (`server/zendesk.ts`) + regra de remap em `diff.ts` se ele referenciar IDs.
 
@@ -134,5 +135,5 @@ npm run build && npm start   # produção: Express serve o front buildado
 
 - Sem deleção, sem rollback/backup automático.
 - Sem login na própria ferramenta — rodar apenas em rede interna.
-- Categorias de gatilho, marcas, usuários, webhooks e SLAs não são mapeados (itens que os referenciam ficam bloqueados ou ignoram o campo).
+- Categorias de gatilho, marcas, usuários e webhooks não são mapeados (itens que os referenciam ficam bloqueados ou ignoram o campo).
 - Condições de formulário por status customizado (`required_on_statuses`) não são remapeadas.

@@ -187,7 +187,7 @@ test('vínculo manual vence o nome', () => {
   assert.equal(out.find(i => i.status === 'so_no_destino')!.targetId, 2)
 })
 
-test('matching ignora caixa, acentos, espaços e pontuação', () => {
+test('matching ignora caixa, acentos e espaços', () => {
   const S = { ticket_fields: [{ id: 1, title: 'Tipo da Requisição', removable: true, type: 'text' }], ticket_forms: [{ id: 5, name: 'F', ticket_field_ids: [1] }], groups: [] }
   const T = { ticket_fields: [{ id: 2, title: ' tipo  da requisicao ', removable: true, type: 'text' }], ticket_forms: [], groups: [] }
   const out = compareAll(S, T, ['ticket_fields', 'ticket_forms'])
@@ -198,12 +198,23 @@ test('matching ignora caixa, acentos, espaços e pontuação', () => {
   assert.deepEqual(out.find(i => i.type === 'ticket_forms')!.source!.ticket_field_ids, [2])
 })
 
+test('símbolos contam no matching: **Banco casa com **Banco, não com Banco', () => {
+  const S = { ticket_fields: [{ id: 1, title: '**Banco', removable: true, type: 'text' }, { id: 2, title: 'Banco', removable: true, type: 'text' }], ticket_forms: [], groups: [] }
+  const T = { ticket_fields: [{ id: 30, title: 'Banco', removable: true, type: 'text' }, { id: 40, title: '**Banco', removable: true, type: 'text' }], ticket_forms: [], groups: [] }
+  const out = compareAll(S, T, ['ticket_fields'])
+  assert.equal(out.find(i => i.sourceId === 1)!.targetId, 40)
+  assert.equal(out.find(i => i.sourceId === 2)!.targetId, 30)
+  const solo = compareAll({ ...S, ticket_fields: [S.ticket_fields[0]!] }, { ...T, ticket_fields: [T.ticket_fields[0]!] }, ['ticket_fields'])
+  assert.equal(solo.find(i => i.sourceId === 1)!.status, 'novo')
+})
+
 test('duplicados: mesmo nome normalizado no ambiente, ignora sistema e apagados', () => {
   const snap = {
     ticket_fields: [
       { id: 1, title: 'Banco', removable: true, type: 'text', active: false },
-      { id: 2, title: ' banco.', removable: true, type: 'tagger' },
+      { id: 2, title: ' BANCO ', removable: true, type: 'tagger' },
       { id: 3, title: 'Banco', removable: false, type: 'subject' },
+      { id: 5, title: '**Banco', removable: true, type: 'text' }, // símbolo conta: não é o mesmo nome
       { id: 4, title: 'Único', removable: true, type: 'text' },
     ],
     ticket_forms: [{ id: 9, name: 'F', ticket_field_ids: [2, 2] }],
@@ -216,4 +227,74 @@ test('duplicados: mesmo nome normalizado no ambiente, ignora sistema e apagados'
     [1, [], false],
     [2, ['ticket_forms:F', 'triggers:G'], true], // repetido no mesmo form conta uma vez
   ])
+})
+
+test('SLA: remapeia filtro, bloqueia organização, status e dependência', () => {
+  const metrics = [{ priority: 'urgent', metric: 'first_reply_time', target: 30, business_hours: false }]
+  const sla = (id: number, filter: object) => ({ id, title: 'SLA Ouro', position: id, filter, policy_metrics: metrics })
+  const S = {
+    groups: [{ id: 111, name: 'G1' }],
+    sla_policies: [
+      sla(1, { all: [{ field: 'group_id', operator: 'is', value: 111 }], any: [] }),
+      { id: 2, title: 'SLA Org', filter: { all: [{ field: 'organization_id', operator: 'is', value: 55 }] }, policy_metrics: metrics },
+    ],
+  }
+  const T = { groups: [{ id: 500, name: 'G1' }], sla_policies: [sla(9, { all: [{ field: 'group_id', operator: 'is', value: 500 }], any: [] })] }
+  const out = compareAll(S, T, ['sla_policies'])
+  assert.equal(out.find(i => i.title === 'SLA Ouro')!.status, 'igual')
+  assert.equal(out.find(i => i.title === 'SLA Org')!.status, 'bloqueado')
+
+  const novo = compareAll(S, { groups: [], sla_policies: [] }, ['sla_policies']).find(i => i.title === 'SLA Ouro')!
+  assert.equal(novo.status, 'novo')
+  assert.deepEqual(novo.requires.map(r => r.title), ['G1'])
+})
+
+test('SLA: ticket_fields_<id> remapeia campo e id da opção; gatilho: custom_status_id remapeia status', () => {
+  const metrics = [{ priority: 'low', metric: 'requester_wait_time', target: 3780, business_hours: true }]
+  const cat = (id: number, opts: [number, string][]) => ({ id, title: 'Categoria 1', removable: true, type: 'tagger', custom_field_options: opts.map(([oid, value]) => ({ id: oid, name: value, value })) })
+  const st = (id: number, status_category: string, agent_label: string) => ({ id, status_category, agent_label })
+  const S = {
+    ticket_fields: [cat(1, [[11, 'cancelamento'], [12, 'extrato']])],
+    custom_statuses: [st(4273209, 'pending', 'Pendente')],
+    sla_policies: [
+      { id: 1, title: 'Cancelamento', filter: { all: [{ field: 'ticket_fields_1', operator: 'is', value: 11 }], any: [] }, policy_metrics: metrics },
+      { id: 2, title: 'Extrato', filter: { all: [{ field: 'ticket_fields_1', operator: 'is', value: '12' }], any: [] }, policy_metrics: metrics },
+      { id: 3, title: 'Demais', filter: { all: [{ field: 'ticket_fields_1', operator: 'is_not', value: null }], any: [] }, policy_metrics: metrics },
+    ],
+    triggers: [{ id: 9, title: 'Pausa', conditions: { all: [{ field: 'custom_status_id', operator: 'includes', value: ['4273209'] }], any: [] }, actions: [{ field: 'custom_status_id', value: '4273209' }] }],
+  }
+  const T = { ticket_fields: [cat(50, [[55, 'cancelamento']])], custom_statuses: [st(777, 'pending', 'Pendente')], sla_policies: [], triggers: [] }
+  const out = compareAll(S, T, ['sla_policies', 'triggers'])
+  const get = (t: string) => out.find(i => i.title === t)!
+  assert.deepEqual(get('Cancelamento').source!.filter.all[0], { field: 'ticket_fields_50', operator: 'is', value: 55 })
+  assert.equal(get('Cancelamento').status, 'novo')
+  assert.equal(get('Extrato').status, 'bloqueado') // opção não existe no campo do destino
+  assert.match(get('Extrato').blocked[0]!, /extrato/)
+  assert.deepEqual(get('Demais').source!.filter.all[0], { field: 'ticket_fields_50', operator: 'is_not', value: null })
+  assert.deepEqual(get('Pausa').source!.conditions.all[0].value, ['777'])
+  assert.equal(get('Pausa').source!.actions[0].value, '777')
+
+  // campo ainda não existe no destino: opção vem junto, SLA depende do campo
+  const novo = compareAll(S, { ...T, ticket_fields: [] }, ['sla_policies']).find(i => i.title === 'Cancelamento')!
+  assert.equal(novo.status, 'novo')
+  assert.deepEqual(novo.requires.map(r => r.title), ['Categoria 1'])
+})
+
+test('inativos ficam fora da comparação, mas referência a inativo ainda remapeia', () => {
+  const f = (id: number, title: string, active = true) => ({ id, title, removable: true, type: 'text', active })
+  const S = { ticket_fields: [f(1, 'A'), f(2, 'B', false)], ticket_forms: [{ id: 5, name: 'F', ticket_field_ids: [2] }], groups: [] }
+  const T = { ticket_fields: [f(10, 'A', false), f(20, 'B'), f(30, 'C', false)], ticket_forms: [], groups: [] }
+  const out = compareAll(S, T, ['ticket_fields', 'ticket_forms'])
+  const fields = out.filter(i => i.type === 'ticket_fields').map(i => [i.title, i.status, i.targetId])
+  assert.deepEqual(fields, [['A', 'novo', null], ['B', 'so_no_destino', 20]])
+  assert.deepEqual(out.find(i => i.type === 'ticket_forms')!.source!.ticket_field_ids, [20])
+})
+
+test('vínculo manual de ativo para inativo é ignorado', () => {
+  const f = (id: number, title: string, active = true) => ({ id, title, removable: true, type: 'text', active })
+  const S = { ticket_fields: [f(1, 'A')], ticket_forms: [{ id: 5, name: 'F', ticket_field_ids: [1] }], groups: [] }
+  const T = { ticket_fields: [f(10, 'Velho', false)], ticket_forms: [], groups: [] }
+  const out = compareAll(S, T, ['ticket_fields', 'ticket_forms'], undefined, { ticket_fields: { '1': 10 } })
+  assert.equal(out.find(i => i.type === 'ticket_fields')!.status, 'novo')
+  assert.deepEqual(out.find(i => i.type === 'ticket_forms')!.missing.map(d => d.title), ['A'])
 })

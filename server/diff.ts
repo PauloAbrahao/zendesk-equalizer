@@ -24,10 +24,13 @@ export type MatchBy = 'manual' | 'nome' | 'conteudo'
 // vínculos manuais por tipo: id na origem -> id no destino
 export type Mappings = Partial<Record<Type, Record<string, number>>>
 type Kind = 'fields' | 'forms' | 'groups' | 'brands'
+// só traduzidos, nunca criados: status personalizado e opção de campo (vem junto com o campo)
+type Lookup = 'statuses' | 'options'
 type IdMap = Map<string, { name: string; tgt?: number }>
 type Match = { s: Obj; srcDup: number[]; t?: Obj; by?: MatchBy; candidates?: Obj[]; suggestion?: Item['suggestion'] }
 type Matches = { list: Match[]; onlyT: Obj[] }
 export type Ctx = { usedS: Set<string>; usedT: Set<string>; targetSubdomain?: string; matches: Partial<Record<Type, Matches>> } & Record<Kind, IdMap>
+  & Record<Lookup, Map<string, { name: string; tgt?: number; fieldTgt?: number }>>
 
 // chaves de topo que variam por ambiente ou são geradas pelo Zendesk
 const DROP_TOP = new Set([
@@ -49,8 +52,8 @@ const KIND_OF = Object.fromEntries(Object.entries(KIND_TYPE).map(([k, t]) => [t,
 const BRAND_DROP = ['subdomain', 'host_mapping', 'brand_url', 'logo', 'has_help_center', 'help_center_state', 'default', 'is_deleted', 'ticket_form_ids']
 
 const fold = (s: unknown) => String(s ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
-// chave de matching entre ambientes: sem caixa, acentos, espaços ou pontuação
-export const norm = (s: unknown) => fold(s).replace(/[^a-z0-9]/g, '')
+// chave de matching entre ambientes: sem caixa, acentos ou espaços; pontuação/símbolos contam ('**Banco' != 'Banco')
+export const norm = (s: unknown) => fold(s).replace(/\s+/g, '')
 
 // subdomínio é único no Zendesk inteiro: marca nova ganha "<subdomínio do destino>-<nome>"
 // ponytail: sem checar se já está em uso; colisão volta como erro do Zendesk e as dependentes não são criadas
@@ -84,6 +87,8 @@ export function depsOf(item: Item, all: Item[]) {
 
 // só campos customizados são migráveis; os de sistema entram apenas no mapa de IDs
 const INCLUDE: Partial<Record<Type, (o: Obj) => boolean>> = { ticket_fields: f => f.removable !== false, groups: g => !g.deleted, brands: b => !b.is_deleted }
+// comparação só enxerga ativos; inativos entram só no mapa de IDs (ativo que referencia inativo ainda remapeia)
+const comparable = (type: Type) => (o: Obj) => (INCLUDE[type]?.(o) ?? true) && o.active !== false
 
 function clean(v: any, top = true): any {
   if (Array.isArray(v)) return v.map(x => clean(x, false))
@@ -109,6 +114,7 @@ function cleanFor(type: Type, obj: Obj): Obj {
   if (o.custom_field_options) o.custom_field_options = o.custom_field_options.map(({ id, ...r }: Obj) => r)
   if (o.conditions && (type === 'triggers' || type === 'automations'))
     o.conditions = { all: o.conditions.all ?? [], any: o.conditions.any ?? [] }
+  if (o.filter && type === 'sla_policies') o.filter = { all: o.filter.all ?? [], any: o.filter.any ?? [] }
   return o
 }
 
@@ -172,6 +178,7 @@ function signature(type: Type, p: Obj): string | null {
   if (type === 'ticket_forms') return p.ticket_field_ids?.length ? JSON.stringify([...p.ticket_field_ids].sort()) : null
   if (type === 'triggers' || type === 'automations')
     return p.actions?.length ? JSON.stringify(sortKeys({ conditions: p.conditions, actions: p.actions })) : null
+  if (type === 'sla_policies') return p.policy_metrics?.length ? JSON.stringify(sortKeys({ filter: p.filter, policy_metrics: p.policy_metrics })) : null
   return null
 }
 
@@ -180,7 +187,7 @@ function signature(type: Type, p: Obj): string | null {
 // título repetido: prefere os migráveis, depois os usados em forms/gatilhos/automações; sobrou mais de um = ambíguo
 function matchType(type: Type, S: Obj[], T: Obj[], ctx: Ctx, manual: Record<string, number>): Matches {
   const key = TYPES[type].title
-  const inc = INCLUDE[type] ?? (() => true)
+  const inc = comparable(type)
   const narrow = (c: Obj[], used: Set<string>) => {
     if (c.some(inc)) c = c.filter(inc)
     const u = c.filter(o => used.has(String(o.id)))
@@ -195,7 +202,8 @@ function matchType(type: Type, S: Obj[], T: Obj[], ctx: Ctx, manual: Record<stri
 
   for (const m of list) {
     const t = tById.get(String(manual[m.s.id]))
-    if (!t || taken.has(t)) continue
+    // vínculo de ativo para inativo é ignorado: mesma regra do casamento por nome
+    if (!t || taken.has(t) || (inc(m.s) && !inc(t))) continue
     Object.assign(m, { t, by: 'manual' })
     taken.add(t)
   }
@@ -203,10 +211,11 @@ function matchType(type: Type, S: Obj[], T: Obj[], ctx: Ctx, manual: Record<stri
   const tByName = group(T, o => norm(o[key]))
   for (const m of list) {
     if (m.t) continue
-    const c = narrow((tByName.get(norm(m.s[key])) ?? []).filter(t => !taken.has(t)), ctx.usedT)
+    // ativo nunca casa com inativo do destino; inativo da origem casa só para o mapa de IDs e não esconde o par do destino
+    const c = narrow((tByName.get(norm(m.s[key])) ?? []).filter(t => !taken.has(t) && (!inc(m.s) || inc(t))), ctx.usedT)
     if (c.length === 1) Object.assign(m, { t: c[0], by: 'nome' })
     else if (c.length > 1) m.candidates = c
-    c.forEach(t => taken.add(t))
+    if (inc(m.s)) c.forEach(t => taken.add(t))
   }
 
   const free = () => list.filter(m => !m.t && !m.candidates && inc(m.s))
@@ -242,7 +251,12 @@ export function buildCtx(S: Snapshot, T: Snapshot, targetSubdomain?: string, map
     targetSubdomain,
     matches: {},
     fields: new Map(), forms: new Map(), groups: new Map(), brands: new Map(),
+    statuses: new Map(), options: new Map(),
   }
+  // status personalizado casa por categoria + rótulo (IDs mudam por ambiente)
+  const stKey = (s: Obj) => `${s.status_category}:${norm(s.agent_label)}`
+  const tSt = new Map((T.custom_statuses ?? []).map(s => [stKey(s), s.id]))
+  for (const s of S.custom_statuses ?? []) ctx.statuses.set(String(s.id), { name: s.agent_label, tgt: tSt.get(stKey(s)) })
   // ORDER já vem com dependências primeiro: assinatura de forms/gatilhos usa os IDs casados antes
   for (const type of ORDER) {
     const m = (ctx.matches[type] = matchType(type, S[type] ?? [], T[type] ?? [], ctx, mappings[type] ?? {}))
@@ -251,12 +265,26 @@ export function buildCtx(S: Snapshot, T: Snapshot, targetSubdomain?: string, map
     // id da origem -> par do seu grupo de título; vínculo manual direto no id vence
     const key = TYPES[type].title
     const byName = new Map(m.list.map(x => [norm(x.s[key]), x.t?.id]))
-    const tIds = new Set((T[type] ?? []).map(t => String(t.id)))
+    const tById = new Map((T[type] ?? []).map(t => [String(t.id), t]))
     const manual = mappings[type] ?? {}
+    const inc = comparable(type)
     ctx[kind] = new Map((S[type] ?? []).map(o => {
-      const mt = manual[o.id]
-      return [String(o.id), { name: o[key], tgt: mt != null && tIds.has(String(mt)) ? mt : byName.get(norm(o[key])) }]
+      const t = tById.get(String(manual[o.id]))
+      return [String(o.id), { name: o[key], tgt: t && (!inc(o) || inc(t)) ? t.id : byName.get(norm(o[key])) }]
     }))
+    // opção de campo casa pela tag dentro do campo par; precisa existir antes do match de SLA
+    if (type === 'ticket_fields') {
+      const tById = new Map((T.ticket_fields ?? []).map(f => [f.id, f]))
+      for (const f of S.ticket_fields ?? []) {
+        const fieldTgt = ctx.fields.get(String(f.id))?.tgt
+        for (const o of f.custom_field_options ?? [])
+          ctx.options.set(String(o.id), {
+            name: `opção "${o.name}" do campo "${f.title}"`,
+            fieldTgt,
+            tgt: tById.get(fieldTgt!)?.custom_field_options?.find((x: Obj) => x.value === o.value)?.id,
+          })
+      }
+    }
   }
   return ctx
 }
@@ -267,7 +295,15 @@ export function buildCtx(S: Snapshot, T: Snapshot, targetSubdomain?: string, map
 export function resolve(type: Type, obj: Obj, ctx: Ctx) {
   const missing: Ref[] = []
   const blocked: string[] = []
-  const ref = (kind: Kind, id: any): any => {
+  const ref = (kind: Kind | Lookup, id: any): any => {
+    if (kind === 'statuses' || kind === 'options') {
+      const m = ctx[kind].get(String(id))
+      if (m?.tgt != null) return typeof id === 'string' ? String(m.tgt) : m.tgt
+      // opção de campo ainda não migrado: vem junto com ele (o campo já entrou em missing)
+      if (kind === 'options' && m && m.fieldTgt == null) return `<novo: ${m.name}>`
+      blocked.push(m ? `${m.name} não existe no destino` : `${kind === 'statuses' ? 'status' : 'opção de campo'} id ${id} não encontrado na origem`)
+      return id
+    }
     const m = ctx[kind].get(String(id))
     if (!m) {
       blocked.push(`${LABEL[kind]} id ${id} não encontrado na origem`)
@@ -284,7 +320,7 @@ export function resolve(type: Type, obj: Obj, ctx: Ctx) {
 
 // percorre toda referência a campo/form/grupo/marca do objeto (já limpo); ref devolve o valor que fica no lugar.
 // onBlocked = referência a algo que não migramos (usuário, webhook...)
-function mapRefs(type: Type, p: Obj, ref: (kind: Kind, id: any) => any, onBlocked: (msg: string) => void = () => {}) {
+function mapRefs(type: Type, p: Obj, ref: (kind: Kind | Lookup, id: any) => any, onBlocked: (msg: string) => void = () => {}) {
   if (p.restricted_brand_ids) p.restricted_brand_ids = p.restricted_brand_ids.map((id: number) => ref('brands', id)).sort((a: number, b: number) => a - b)
 
   if (type === 'ticket_forms') {
@@ -299,12 +335,18 @@ function mapRefs(type: Type, p: Obj, ref: (kind: Kind, id: any) => any, onBlocke
     }
   }
 
-  if (type === 'triggers' || type === 'automations') {
+  // filtro do SLA tem o mesmo formato das condições de gatilho
+  if (type === 'triggers' || type === 'automations' || type === 'sla_policies') {
     const rule = (r: Obj) => {
       let { field, value } = r
       const first = Array.isArray(value) ? value[0] : value
-      const cf = /^custom_fields_(\d+)$/.exec(field)
-      if (cf) field = `custom_fields_${ref('fields', cf[1])}`
+      // gatilho: custom_fields_<id> com a tag (igual entre ambientes); SLA: ticket_fields_<id> com o id da opção
+      const cf = /^(custom_fields|ticket_fields)_(\d+)$/.exec(field)
+      if (cf) {
+        field = `${cf[1]}_${ref('fields', cf[2])}`
+        if (cf[1] === 'ticket_fields' && isNum(value)) value = ref('options', value)
+      } else if (field === 'custom_status_id' && isNum(first))
+        value = Array.isArray(value) ? value.map(v => ref('statuses', v)) : ref('statuses', value)
       else if (field === 'ticket_form_id' && isNum(value)) value = ref('forms', value)
       else if (field === 'group_id' && isNum(value)) value = ref('groups', value)
       else if (field === 'brand_id' && isNum(value)) value = ref('brands', value)
@@ -315,6 +357,7 @@ function mapRefs(type: Type, p: Obj, ref: (kind: Kind, id: any) => any, onBlocke
     }
     if (p.conditions) p.conditions = { all: p.conditions.all.map(rule), any: p.conditions.any.map(rule) }
     if (p.actions) p.actions = p.actions.map(rule)
+    if (p.filter) p.filter = { all: p.filter.all.map(rule), any: p.filter.any.map(rule) }
   }
   return p
 }
@@ -328,6 +371,7 @@ export function usages(snap: Snapshot) {
     for (const o of snap[type] ?? []) {
       const seen = new Set<string>()
       mapRefs(type, cleanFor(type, o), (kind, id) => {
+        if (kind === 'statuses' || kind === 'options') return id
         const k = `${KIND_TYPE[kind]}:${id}`
         if (id != null && !seen.has(k)) {
           seen.add(k)
@@ -341,7 +385,7 @@ export function usages(snap: Snapshot) {
 
 export function compare(type: Type, ctx: Ctx): Item[] {
   const key = TYPES[type].title
-  const include = INCLUDE[type] ?? (() => true)
+  const include = comparable(type)
   const { list, onlyT } = ctx.matches[type]!
 
   const items = list.filter(m => include(m.s)).map((m): Item => {
